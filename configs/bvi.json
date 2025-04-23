@@ -3,7 +3,7 @@
     "save_dir": "checkpoints/",
     "data_loader": {
         "name": "BVI",
-        "data_root": "./data",
+        "data_root": "./dataset_copy/low_light_10",
         "w": 432,
         "h": 240,
         "sample_length": 5
@@ -16,18 +16,18 @@
     },
     "model": {
         "net": "fuseformer",
-        "no_dis": 0
+        "no_dis": 1
     },
     "trainer": {
         "type": "Adam",
-        "beta1": 0.0,
+        "beta1": 0.5,
         "beta2": 0.99,
-        "lr": 1e-4,
+        "lr": 1e-5,
         "batch_size": 8,
-        "num_workers": 0,
-        "log_freq": 100,
-        "save_freq": 1e4,
-        "iterations": 50e4,
-        "niter": 40e4
+        "num_workers": 4,
+        "log_freq": 20,
+        "save_freq": 200,
+        "iterations": 25000,
+        "niter": 5000
     }
 }

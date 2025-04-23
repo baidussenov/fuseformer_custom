@@ -16,7 +16,7 @@ from core.dist import (
 )
 
 parser = argparse.ArgumentParser(description='FuseFormer')
-parser.add_argument('-c', '--config', default='configs/youtube-vos.json', type=str)
+parser.add_argument('-c', '--config', default='configs/bvi.json', type=str)
 parser.add_argument('-p', '--port', default='23455', type=str)
 args = parser.parse_args()
 

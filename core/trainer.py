@@ -126,6 +126,7 @@ class Trainer():
                 os.path.join(model_path, '*.pth'))]
             ckpts.sort()
             latest_epoch = ckpts[-1] if len(ckpts) > 0 else None
+
         if latest_epoch is not None:
             gen_path = os.path.join(
                 model_path, 'gen_{}.pth'.format(str(latest_epoch).zfill(5)))
@@ -136,7 +137,13 @@ class Trainer():
             if self.config['global_rank'] == 0:
                 print('Loading model from {}...'.format(gen_path))
             data = torch.load(gen_path, map_location=self.config['device'])
-            self.netG.load_state_dict(data['netG'])
+            
+            # Check if the loaded data is a direct state_dict or contains 'netG'
+            if 'netG' in data:
+                self.netG.load_state_dict(data['netG'])
+            else:
+                self.netG.load_state_dict(data)  # Load directly if it's a state_dict
+
             if not self.config['model']['no_dis']:
                 data = torch.load(dis_path, map_location=self.config['device'])
                 self.netD.load_state_dict(data['netD'])
@@ -147,9 +154,16 @@ class Trainer():
             self.epoch = data['epoch']
             self.iteration = data['iteration']
         else:
-            if self.config['global_rank'] == 0:
-                print(
-                    'Warnning: There is no trained model found. An initialized model will be used.')
+            # Load pretrained fuseformer.pth if no checkpoint is found
+            pretrained_path = 'checkpoints/fuseformer.pth'  # Specify the path to fuseformer.pth
+            if os.path.isfile(pretrained_path):
+                if self.config['global_rank'] == 0:
+                    print('Loading pretrained model from {}...'.format(pretrained_path))
+                data = torch.load(pretrained_path, map_location=self.config['device'])
+                self.netG.load_state_dict(data)  # Load directly as state_dict
+            else:
+                if self.config['global_rank'] == 0:
+                    print('Warning: No trained model found. An initialized model will be used.')
 
     # save parameters every eval_epoch
     def save(self, it):
@@ -185,25 +199,29 @@ class Trainer():
 
     # train entry
     def train(self):
-        pbar = range(int(self.train_args['iterations']))
-        if self.config['global_rank'] == 0:
-            pbar = tqdm(pbar, initial=self.iteration, dynamic_ncols=True, smoothing=0.01)
+        try:
+            pbar = range(int(self.train_args['iterations']))
+            if self.config['global_rank'] == 0:
+                pbar = tqdm(pbar, initial=self.iteration, dynamic_ncols=True, smoothing=0.01)
 
-        os.makedirs('logs', exist_ok=True)
-        logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
-                    datefmt='%a, %d %b %Y %H:%M:%S',
-                    filename='logs/{}.log'.format(self.config['save_dir'].split('/')[-1]),
-                    filemode='w')
-        
-        while True:
-            self.epoch += 1
-            if self.config['distributed']:
-                self.train_sampler.set_epoch(self.epoch)
+            os.makedirs('logs', exist_ok=True)
+            logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
+                        datefmt='%a, %d %b %Y %H:%M:%S',
+                        filename='logs/{}.log'.format(self.config['save_dir'].split('/')[-1]),
+                        filemode='w')
 
-            self._train_epoch(pbar)
-            if self.iteration > self.train_args['iterations']:
-                break
+            while True:
+                self.epoch += 1
+                if self.config['distributed']:
+                    self.train_sampler.set_epoch(self.epoch)
+
+                self._train_epoch(pbar)
+                if self.iteration > self.train_args['iterations']:
+                    break
+        finally:
+            if self.config.get('distributed', False):
+                torch.distributed.destroy_process_group()
         print('\nEnd training....')
 
     # process input and calculate loss every training epoch
@@ -270,22 +288,21 @@ class Trainer():
                 pbar.update(1)
                 if not self.config['model']['no_dis']:
                     pbar.set_description((
-                        f"d: {dis_loss.item():.3f}; g: {gan_loss.item():.3f};"
-                        f"hole: {hole_loss.item():.3f}; valid: {valid_loss.item():.3f}")
+                        f"d: {dis_loss.item():.8f}; g: {gan_loss.item():.8f};"
+                        f"hole: {hole_loss.item():.8f}; valid: {valid_loss.item():.8f}")
                     )
                 else:
                     pbar.set_description((
-                        f"hole: {hole_loss.item():.3f}; valid: {valid_loss.item():.3f}")
+                        f"hole: {hole_loss.item():.8f}; valid: {valid_loss.item():.8f}")
                     )
 
                 if self.iteration % self.train_args['log_freq'] == 0:
                     if not self.config['model']['no_dis']:
-                        logging.info('[Iter {}] d: {:.4f}; g: {:.4f}; hole: {:.4f}; valid: {:.4f}'.format(self.iteration, dis_loss.item(), gan_loss.item(), hole_loss.item(), valid_loss.item()))
+                        logging.info('[Iter {}] d: {:.8f}; g: {:.8f}; hole: {:.8f}; valid: {:.8f}'.format(self.iteration, dis_loss.item(), gan_loss.item(), hole_loss.item(), valid_loss.item()))
                     else:
-                        logging.info('[Iter {}] hole: {:.4f}; valid: {:.4f}'.format(self.iteration, hole_loss.item(), valid_loss.item()))
+                        logging.info('[Iter {}] hole: {:.8f}; valid: {:.8f}'.format(self.iteration, hole_loss.item(), valid_loss.item()))
             # saving models
             if self.iteration % self.train_args['save_freq'] == 0:
                 self.save(int(self.iteration//self.train_args['save_freq']))
             if self.iteration > self.train_args['iterations']:
                 break
-
