@@ -1,6 +1,7 @@
 bvi_masks
 data
 fuseformer_single_mask_results
+fuseformer_single_mask_results_low10
 dataset_copy
 .devcontainer
 checkpoints

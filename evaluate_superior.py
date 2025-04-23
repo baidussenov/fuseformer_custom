@@ -44,7 +44,7 @@ parser.add_argument("--outw", type=int, default=432)
 parser.add_argument("--outh", type=int, default=240)
 parser.add_argument("--step", type=int, default=10)
 parser.add_argument("--num_ref", type=int, default=-1)
-parser.add_argument("--neighbor_stride", type=int, default=5)
+parser.add_argument("--neighbor_stride", type=int, default=10)
 parser.add_argument("--savefps", type=int, default=24)
 parser.add_argument("--use_mp4", action='store_true')
 parser.add_argument("--dump_results", action='store_true')
@@ -158,7 +158,7 @@ def get_frame_list(args):
         data_root = "./data/YouTubeVOS/"
         frame_dir = os.path.join(data_root, "test_all_frames", "JPEGImages")
     else:
-        frame_dir = "dataset_copy/normal_light_10"
+        frame_dir = "dataset_copy/low_light_10"
         masks_path = '../masker/output_masks'
 
     frame_folder = sorted(os.listdir(frame_dir))
@@ -247,7 +247,7 @@ def main_worker():
     real_i3d_activations = []
 
     model_name = args.ckpt.split("/")[-1].split(".")[0]
-    dump_results_dir = model_name + "_single_mask_results"
+    dump_results_dir = model_name + "_single_mask_results_low10"
     if args.dump_results:
         if not os.path.exists(dump_results_dir):
             os.mkdir(dump_results_dir)
@@ -263,6 +263,8 @@ def main_worker():
         video_length = len(frame_from_videos)
         comp_frames = [None] * video_length
         gt_frames = [None] * video_length  # Store ground truth frames
+        all_comp_PIL = []  # Store all completed frames for VFID
+        all_gt_PIL = []    # Store all ground truth frames for VFID
 
         # Define chunking parameters
         max_frames_per_chunk = 30
@@ -325,6 +327,7 @@ def main_worker():
         # Evaluation loop
         ssim, psnr, s_psnr = 0., 0., 0.
         comp_PIL = []
+        gt_PIL = []
         for f in range(video_length):
             comp = comp_frames[f]
             comp = cv2.cvtColor(np.array(comp), cv2.COLOR_BGR2RGB)
@@ -333,244 +336,77 @@ def main_worker():
             new_comp = cv2.imread("tmpp.png")
             new_comp = Image.fromarray(cv2.cvtColor(new_comp, cv2.COLOR_BGR2RGB))
             comp_PIL.append(new_comp)
+            all_comp_PIL.append(new_comp)  # Add to VFID collection
+
+            # Store ground truth for VFID
+            gt = gt_frames[f]
+            gt_pil = Image.fromarray(cv2.cvtColor(gt, cv2.COLOR_BGR2RGB))
+            gt_PIL.append(gt_pil)
+            all_gt_PIL.append(gt_pil)  # Add to VFID collection
 
             if args.dump_results:
                 cv2.imwrite(os.path.join(this_dump_results_dir, "{:04}.png".format(f)), comp)
 
-            # Use gt_frames for ground truth
-            gt = cv2.cvtColor(np.array(gt_frames[f]).astype(np.uint8), cv2.COLOR_BGR2RGB)
-            ssim += ssim_func(comp, gt, data_range=255, channel_axis=-1, win_size=65)
-            s_psnr += psnr_func(gt  , comp, data_range=255)
+            # Compute metrics
+            gt_rgb = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
+            ssim += ssim_func(comp, gt_rgb, data_range=255, channel_axis=-1, win_size=65)
+            s_psnr += psnr_func(gt_rgb, comp, data_range=255)
 
         ssim_all += ssim
         s_psnr_all += s_psnr
         video_length_all += video_length
-        if video_no % 5 == 0:
-            print("ssim {}, psnr {}".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
+        # if video_no % 5 == 0:
+        print("ssim {}, psnr {}".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
+
+        # Compute VFID for this video
+        if len(all_comp_PIL) > 0 and len(all_gt_PIL) > 0:
+            # Convert to tensors in batches to avoid memory issues
+            batch_size = 32  # Process frames in batches for VFID computation
+            num_batches = (len(all_comp_PIL) + batch_size - 1) // batch_size
+            
+            video_output_activations = []
+            video_real_activations = []
+            
+            for batch_idx in range(num_batches):
+                start = batch_idx * batch_size
+                end = min(start + batch_size, len(all_comp_PIL))
+                
+                # Process completed frames
+                comp_batch = _to_tensors(all_comp_PIL[start:end]).unsqueeze(0).to(device)
+                output_activations = get_i3d_activations(comp_batch).cpu().numpy()
+                video_output_activations.append(output_activations)
+                
+                # Process ground truth frames
+                gt_batch = _to_tensors(all_gt_PIL[start:end]).unsqueeze(0).to(device)
+                real_activations = get_i3d_activations(gt_batch).cpu().numpy()
+                video_real_activations.append(real_activations)
+                
+                del comp_batch, gt_batch
+                torch.cuda.empty_cache()
+            
+            # Concatenate all activations for this video
+            if video_output_activations:
+                video_output_activations = np.concatenate(video_output_activations, axis=0)
+                video_real_activations = np.concatenate(video_real_activations, axis=0)
+                
+                # Compute mean activation for this video (to avoid memory issues with many videos)
+                output_i3d_activations.append(np.mean(video_output_activations, axis=0))
+                real_i3d_activations.append(np.mean(video_real_activations, axis=0))
 
         # Clear CPU memory
-        del comp_frames, gt_frames, frame_from_videos
+        del comp_frames, gt_frames, frame_from_videos, all_comp_PIL, all_gt_PIL, comp_PIL, gt_PIL
         torch.cuda.empty_cache()
 
-    fid_score = get_fid_score(real_i3d_activations, output_i3d_activations)
-    print("[Finish evaluating, ssim is {}, psnr is {}]".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
-    print("[fvid score is {}]".format(fid_score))
-
-# def main_worker():
-#     # set up models 
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     net = importlib.import_module('model.' + args.model)
-#     model = net.InpaintGenerator().to(device)
-#     model_path = args.ckpt
-#     data = torch.load(args.ckpt, map_location=device)
-#     model.load_state_dict(data)
-#     print('loading from: {}'.format(args.ckpt))
-#     model.eval()
-
-#     frame_list, mask_path = get_frame_list(args)
-#     print('Num of frames: ', len(frame_list))
-#     video_num = len(frame_list)
-
-#     ssim_all, psnr_all, len_all = 0., 0., 0.
-#     s_psnr_all = 0.
-#     video_length_all = 0
-#     vfid = 0.
-#     output_i3d_activations = []
-#     real_i3d_activations = []
-
-#     model_name = args.ckpt.split("/")[-1].split(".")[0]
-#     dump_results_dir = model_name+"_single_mask_results"
-#     if args.dump_results:
-#         if not os.path.exists(dump_results_dir):
-#             os.mkdir(dump_results_dir)
-            
-#     # Add tqdm for video processing loop
-#     for video_no in tqdm(range(video_num), desc="Processing videos"):
-#         print("[Processing: {}]".format(frame_list[video_no].split("/")[-1]))
-#         if args.dump_results:
-#             this_dump_results_dir = os.path.join(dump_results_dir, frame_list[video_no].split("/")[-1])
-#             os.makedirs(this_dump_results_dir, exist_ok=True)
-
-#         frames_PIL = read_frame_from_videos(frame_list[video_no])
-#         video_length = len(frames_PIL)
-#         masks_PIL = read_single_mask(mask_path, video_length)
-
-#         # Don't convert to tensors and move to GPU here
-#         frames = [np.array(f).astype(np.uint8) for f in frames_PIL]
-#         binary_masks = [np.expand_dims((np.array(m) != 0).astype(np.uint8), 2) for m in masks_PIL]
-#         comp_frames = [None]*video_length
-
-#         # Process in chunks with tqdm
-#         chunk_size = 30  # Adjust based on your GPU memory
-#         chunk_pbar = tqdm(range(0, video_length, chunk_size), desc="Processing chunks", leave=False)
-#         for chunk_start in chunk_pbar:
-#             chunk_end = min(chunk_start + chunk_size, video_length)
-#             chunk_frames = frames_PIL[chunk_start:chunk_end]
-#             chunk_masks = masks_PIL[chunk_start:chunk_end]
-            
-#             # Update chunk progress bar with info
-#             chunk_pbar.set_postfix({
-#                 "chunk": f"{chunk_start}-{chunk_end}",
-#                 "frames": len(chunk_frames)
-#             })
-            
-#             # Convert only this chunk to tensors and move to GPU
-#             chunk_imgs = _to_tensors(chunk_frames).unsqueeze(0)*2-1
-#             chunk_masks_tensor = _to_tensors(chunk_masks).unsqueeze(0)
-#             chunk_imgs, chunk_masks_tensor = chunk_imgs.to(device), chunk_masks_tensor.to(device)
-            
-#             # Process frames within this chunk
-#             frame_pbar = tqdm(range(chunk_start, chunk_end, neighbor_stride), 
-#                              desc="Processing frames", leave=False)
-#             for f in frame_pbar:
-#                 local_f = f - chunk_start  # Local index within the chunk
-                
-#                 # Calculate neighbor frames within the chunk
-#                 neighbor_ids = [i for i in range(
-#                     max(0, local_f-neighbor_stride), 
-#                     min(chunk_end-chunk_start, local_f+neighbor_stride+1)
-#                 )]
-                
-#                 # For reference frames, you might need to load them separately
-#                 global_neighbor_ids = [n + chunk_start for n in neighbor_ids]
-#                 ref_ids = get_ref_index(f, global_neighbor_ids, video_length)
-                
-#                 # Show info in frame progress bar
-#                 frame_pbar.set_postfix({
-#                     "frame": f,
-#                     "refs": len(ref_ids)
-#                 })
-                
-#                 # Handle reference frames from outside the current chunk
-#                 extra_ref_frames = []
-#                 extra_ref_masks = []
-#                 in_chunk_ref_ids = []
-                
-#                 for ref_id in ref_ids:
-#                     if chunk_start <= ref_id < chunk_end:
-#                         # Reference frame is within the current chunk
-#                         in_chunk_ref_ids.append(ref_id - chunk_start)
-#                     else:
-#                         # Reference frame is outside the current chunk
-#                         extra_ref_frames.append(frames_PIL[ref_id])
-#                         extra_ref_masks.append(masks_PIL[ref_id])
-                
-#                 if extra_ref_frames:
-#                     extra_imgs = _to_tensors(extra_ref_frames).unsqueeze(0)*2-1
-#                     extra_masks = _to_tensors(extra_ref_masks).unsqueeze(0)
-#                     extra_imgs, extra_masks = extra_imgs.to(device), extra_masks.to(device)
-                    
-#                     # Combine with chunk tensors for processing
-#                     if in_chunk_ref_ids:
-#                         selected_imgs = torch.cat([
-#                             chunk_imgs[:1, neighbor_ids, :, :, :],
-#                             chunk_imgs[:1, in_chunk_ref_ids, :, :, :],
-#                             extra_imgs
-#                         ], dim=1)
-#                         selected_masks = torch.cat([
-#                             chunk_masks_tensor[:1, neighbor_ids, :, :, :],
-#                             chunk_masks_tensor[:1, in_chunk_ref_ids, :, :, :],
-#                             extra_masks
-#                         ], dim=1)
-#                     else:
-#                         selected_imgs = torch.cat([
-#                             chunk_imgs[:1, neighbor_ids, :, :, :], 
-#                             extra_imgs
-#                         ], dim=1)
-#                         selected_masks = torch.cat([
-#                             chunk_masks_tensor[:1, neighbor_ids, :, :, :], 
-#                             extra_masks
-#                         ], dim=1)
-#                 else:
-#                     # Use only frames from the current chunk
-#                     if in_chunk_ref_ids:
-#                         all_ids = neighbor_ids + in_chunk_ref_ids
-#                         selected_imgs = chunk_imgs[:1, all_ids, :, :, :]
-#                         selected_masks = chunk_masks_tensor[:1, all_ids, :, :, :]
-#                     else:
-#                         selected_imgs = chunk_imgs[:1, neighbor_ids, :, :, :]
-#                         selected_masks = chunk_masks_tensor[:1, neighbor_ids, :, :, :]
-                
-#                 with torch.no_grad():
-#                     input_imgs = selected_imgs*(1-selected_masks)
-#                     pred_img = model(input_imgs)
-#                     pred_img = (pred_img + 1) / 2
-#                     pred_img = pred_img.cpu().permute(0, 2, 3, 1).numpy()*255
-                    
-#                     # Update the appropriate frames
-#                     for i, local_idx in enumerate(neighbor_ids):
-#                         global_idx = local_idx + chunk_start
-#                         img = np.array(pred_img[i]).astype(np.uint8)*binary_masks[global_idx] + \
-#                               frames[global_idx] * (1-binary_masks[global_idx])
-#                         if comp_frames[global_idx] is None:
-#                             comp_frames[global_idx] = img
-#                         else:
-#                             comp_frames[global_idx] = comp_frames[global_idx].astype(np.float32)*0.5 + \
-#                                                     img.astype(np.float32)*0.5
-                
-#                 # Clear GPU cache after processing each frame if needed
-#                 if video_length > 200:  # Only for very large videos
-#                     torch.cuda.empty_cache()
-            
-#             # Clear these tensors explicitly before the next chunk
-#             del chunk_imgs, chunk_masks_tensor
-#             if 'extra_imgs' in locals():
-#                 del extra_imgs, extra_masks
-#             torch.cuda.empty_cache()
-
-#         # Continue with your existing metrics calculation
-#         ssim, psnr, s_psnr = 0., 0., 0.
-#         comp_PIL = []
-#         for f in range(video_length):
-#             comp = comp_frames[f]
-#             comp = cv2.cvtColor(np.array(comp), cv2.COLOR_BGR2RGB)
-
-#             cv2.imwrite("tmpp.png", comp)
-#             new_comp = cv2.imread("tmpp.png")
-#             new_comp = Image.fromarray(cv2.cvtColor(new_comp, cv2.COLOR_BGR2RGB))
-#             comp_PIL.append(new_comp)
-
-#             if args.dump_results:
-#                 cv2.imwrite(os.path.join(this_dump_results_dir, "{:04}.png".format(f)), comp)
-#             gt = cv2.cvtColor(np.array(frames[f]).astype(np.uint8), cv2.COLOR_BGR2RGB)
-#             ssim += ssim_func(comp, gt, data_range=255, channel_axis=-1, win_size=65)
-#             s_psnr += psnr_func(gt, comp, data_range=255)
-
-#         ssim_all += ssim
-#         s_psnr_all += s_psnr
-#         video_length_all += (video_length)
-#         if video_no % 5 == 0:
-#             print("ssim {}, psnr {}".format(ssim_all/video_length_all, s_psnr_all/video_length_all))
-            
-#         # FVID computation - also process in chunks to avoid memory issues
-#         fvid_chunk_size = 10  # Process 10 frames at a time for FID
-#         output_activations = []
-#         real_activations = []
-        
-#         for i in tqdm(range(0, video_length, fvid_chunk_size), desc="Computing FID", leave=False):
-#             end_i = min(i + fvid_chunk_size, video_length)
-            
-#             # Process output frames
-#             out_imgs = _to_tensors(comp_PIL[i:end_i]).unsqueeze(0).to(device)
-#             out_activations = get_i3d_activations(out_imgs).cpu().numpy()
-#             output_activations.append(out_activations)
-            
-#             # Process ground truth frames
-#             gt_imgs = _to_tensors(frames_PIL[i:end_i]).unsqueeze(0).to(device)
-#             gt_activations = get_i3d_activations(gt_imgs).cpu().numpy()
-#             real_activations.append(gt_activations)
-            
-#             # Clear memory
-#             del out_imgs, gt_imgs
-#             torch.cuda.empty_cache()
-        
-#         # Combine and flatten activations
-#         output_i3d_activations.append(np.vstack(output_activations).flatten())
-#         real_i3d_activations.append(np.vstack(real_activations).flatten())
-        
-#     fid_score = get_fid_score(real_i3d_activations, output_i3d_activations)
-#     print("[Finish evaluating, ssim is {}, psnr is {}]".format(ssim_all/video_length_all, s_psnr_all/video_length_all))
-#     print("[fvid score is {}]".format(fid_score))
+    # Compute VFID across all videos
+    if len(output_i3d_activations) > 0 and len(real_i3d_activations) > 0:
+        output_i3d_activations = np.array(output_i3d_activations)
+        real_i3d_activations = np.array(real_i3d_activations)
+        fid_score = get_fid_score(real_i3d_activations, output_i3d_activations)
+        print("[Finish evaluating, ssim is {}, psnr is {}]".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
+        print("[VFID score is {}]".format(fid_score))
+    else:
+        print("[Finish evaluating, ssim is {}, psnr is {}]".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
+        print("[VFID computation skipped - no valid frames processed]")
 
 if __name__ == '__main__':
     main_worker()
