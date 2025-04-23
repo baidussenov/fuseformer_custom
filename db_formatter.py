@@ -2,7 +2,7 @@ import os
 import shutil
 
 # Define the source and destination base directories
-source_dir = "dataset"  # Original dataset folder
+source_dir = "../BVI-Lowlight-videos"  # Original dataset folder
 dest_dir = "dataset_copy"  # New dataset folder
 
 # Create the destination directory if it doesn't exist

@@ -1,6 +1,7 @@
 bvi_masks
 data
 fuseformer_single_mask_results
-test_db
+dataset_copy
 .devcontainer
 checkpoints
+venv

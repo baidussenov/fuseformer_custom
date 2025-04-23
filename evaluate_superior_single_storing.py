@@ -134,8 +134,21 @@ def init_i3d_model():
     print("[Loading I3D model for FID score ..]")
     i3d_model_weight = './checkpoints/i3d_rgb_imagenet.pt'
     i3d_model = InceptionI3d(400, in_channels=3, final_endpoint='Logits')
-    i3d_model.load_state_dict(torch.load(i3d_model_weight))
-    i3d_model.to(torch.device('cuda:0'))
+    i3d_model.load_state_dict(torch.load(i3d_model_weight, map_location='cpu'))
+    i3d_model.to(torch.device('cpu'))
+
+# def get_i3d_activations(batched_video, target_endpoint='Logits', flatten=True, grad_enabled=False):
+#     """
+#     Get features from i3d model and flatten them to 1d feature,
+#     valid target endpoints are defined in InceptionI3d.VALID_ENDPOINTS
+#     """
+#     init_i3d_model()
+#     with torch.set_grad_enabled(grad_enabled):
+#         feat = i3d_model.extract_features(batched_video.transpose(1, 2), target_endpoint)
+#     if flatten:
+#         feat = feat.view(feat.size(0), -1)
+
+#     return feat
 
 def get_i3d_activations(batched_video, target_endpoint='Logits', flatten=True, grad_enabled=False):
     """
@@ -143,6 +156,12 @@ def get_i3d_activations(batched_video, target_endpoint='Logits', flatten=True, g
     valid target endpoints are defined in InceptionI3d.VALID_ENDPOINTS
     """
     init_i3d_model()
+    device = next(i3d_model.parameters()).device  # Get the device of the model
+    
+    # Make sure the input is on the same device as the model
+    if batched_video.device != device:
+        batched_video = batched_video.to(device)
+        
     with torch.set_grad_enabled(grad_enabled):
         feat = i3d_model.extract_features(batched_video.transpose(1, 2), target_endpoint)
     if flatten:
@@ -158,8 +177,8 @@ def get_frame_list(args):
         data_root = "./data/YouTubeVOS/"
         frame_dir = os.path.join(data_root, "test_all_frames", "JPEGImages")
     else:
-        frame_dir = "data/normal_light_10"
-        mask_path = 'bvi_masks/00001/00001.png'
+        frame_dir = "dataset_copy/normal_light_10"
+        mask_path = '../masker/output_masks/S01_colour_chart/masks/00001.png'
 
     frame_folder = sorted(os.listdir(frame_dir))
     frame_list = [os.path.join(frame_dir, name) for name in frame_folder]
@@ -219,7 +238,7 @@ def get_res_list(dir):
 
 def main_worker():
     # Set up models 
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     net = importlib.import_module('model.' + args.model)
     model = net.InpaintGenerator().to(device)
     model_path = args.ckpt
@@ -298,10 +317,15 @@ def main_worker():
 
         # FVID computation
         comp_PIL = [Image.open(os.path.join(this_dump_results_dir, "{:04}.png".format(f))) for f in range(video_length)]
-        imgs = _to_tensors(comp_PIL).unsqueeze(0).to(device)
-        gts = _to_tensors(frames_PIL).unsqueeze(0).to(device)
-        output_i3d_activations.append(get_i3d_activations(imgs).cpu().numpy().flatten())
-        real_i3d_activations.append(get_i3d_activations(gts).cpu().numpy().flatten())
+        # imgs = _to_tensors(comp_PIL).unsqueeze(0).to(device)
+        # gts = _to_tensors(frames_PIL).unsqueeze(0).to(device)
+        # output_i3d_activations.append(get_i3d_activations(imgs).cpu().numpy().flatten())
+        # real_i3d_activations.append(get_i3d_activations(gts).cpu().numpy().flatten())
+
+        imgs = _to_tensors(comp_PIL).unsqueeze(0).to('cpu')  # Move to CPU
+        gts = _to_tensors(frames_PIL).unsqueeze(0).to('cpu')  # Move to CPU
+        output_i3d_activations.append(get_i3d_activations(imgs).numpy().flatten())
+        real_i3d_activations.append(get_i3d_activations(gts).numpy().flatten())
 
         # Clear GPU memory again
         del imgs, gts
