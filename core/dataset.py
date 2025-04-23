@@ -17,8 +17,8 @@ class Dataset(torch.utils.data.Dataset):
         self.sample_length = args['sample_length']
         self.size = self.w, self.h = (args['w'], args['h'])
 
-        if args['name'] == 'YouTubeVOS':
-            vid_lst_prefix = os.path.join(args['data_root'], args['name'], split+'_all_frames/JPEGImages')
+        if args['name'] == 'BVI':
+            vid_lst_prefix = os.path.join(args['data_root'])
             vid_lst = os.listdir(vid_lst_prefix)
             self.video_names = [os.path.join(vid_lst_prefix, name) for name in vid_lst]
 

@@ -1,11 +1,12 @@
---extra-index-url https://download.pytorch.org/whl/cu124 
+--extra-index-url https://download.pytorch.org/whl/cu126
 torch 
 torchvision
 
 opencv-python
-matplotlib
+matplotlib==3.9.0
 pillow
 numpy
 scipy
 scikit-image
 tqdm
+tensorboardX
