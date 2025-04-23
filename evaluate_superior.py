@@ -159,13 +159,13 @@ def get_frame_list(args):
         frame_dir = os.path.join(data_root, "test_all_frames", "JPEGImages")
     else:
         frame_dir = "dataset_copy/normal_light_10"
-        mask_path = '../masker/output_masks/S01_colour_chart/masks/00001.png'
+        masks_path = '../masker/output_masks'
 
     frame_folder = sorted(os.listdir(frame_dir))
     frame_list = [os.path.join(frame_dir, name) for name in frame_folder]
 
     print("[Finish building dataset {}]".format(args.dataset))
-    return frame_list, mask_path
+    return frame_list, masks_path
 
 # sample reference frames from the whole video 
 def get_ref_index(f, neighbor_ids, length):
@@ -184,22 +184,26 @@ def get_ref_index(f, neighbor_ids, length):
                     break
     return ref_index
 
-# Read a single mask and replicate it for all frames
-def read_single_mask(mask_path, video_length):
-    # Read the single mask
+def read_single_mask(mask_path, video_length=None):
+    """
+    Read and process a single mask image for a specific frame.
+    
+    Args:
+        mask_path (str): Path to the mask image file (e.g., '00001.png').
+        video_length (int, optional): Not used, included for compatibility.
+    
+    Returns:
+        PIL.Image: Processed mask as a PIL Image.
+    """
+    if not os.path.exists(mask_path):
+        raise FileNotFoundError(f"Mask file not found: {mask_path}")
     mask = Image.open(mask_path)
-    mask = mask.resize((w, h), Image.NEAREST)
-    mask = np.array(mask.convert('L'))
-    mask = np.array(mask > 0).astype(np.uint8)
-    mask = cv2.dilate(mask, cv2.getStructuringElement(
-        cv2.MORPH_CROSS, (3, 3)), iterations=4)
-    
-    # Convert to PIL Image
-    mask_pil = Image.fromarray(mask*255)
-    
-    # Replicate for all frames
-    masks = [mask_pil] * video_length
-    return masks
+    mask = mask.resize((w, h), Image.NEAREST)  # Ensure w, h are defined
+    mask = np.array(mask.convert('L'))  # Convert to grayscale
+    mask = np.array(mask > 0).astype(np.uint8)  # Binarize
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3)), iterations=4)
+    mask_pil = Image.fromarray(mask * 255)  # Convert to PIL Image
+    return mask_pil
 
 #  read frames from video 
 def read_frame_from_videos(vname):
@@ -218,31 +222,20 @@ def get_res_list(dir):
     folders = sorted(os.listdir(dir))
     return [os.path.join(dir, f) for f in folders]
 
-
-import subprocess as sp
-
-def get_gpu_memory():
-    command = "nvidia-smi --query-gpu=memory.free --format=csv"
-    memory_free_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
-    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
-    return memory_free_values
-
 def main_worker():
     import os
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = importlib.import_module('model.' + args.model)
-    print('GPU check 1', get_gpu_memory())
     model = net.InpaintGenerator().to(device)
-    print('GPU check 2', get_gpu_memory())
     model_path = args.ckpt
     data = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(data)
     print('loading from: {}'.format(args.ckpt))
     model.eval()
 
-    frame_list, mask_path = get_frame_list(args)
+    frame_list, masks_path = get_frame_list(args)
     print('Num of frames: ', len(frame_list))
     video_num = len(frame_list)
 
@@ -282,11 +275,9 @@ def main_worker():
             end_idx = min(start_idx + max_frames_per_chunk, video_length)
             chunk_indices = list(range(start_idx, end_idx))
             chunk_size = len(chunk_indices)
-            # print(f"Chunk {chunk_idx}: indices {chunk_indices}, size {chunk_size}")
 
             # Load frames for this chunk
             frames_PIL = [frame_from_videos[i] for i in chunk_indices]
-            # print(f"Frame size: {frames_PIL[0].size}")
             imgs = _to_tensors(frames_PIL).unsqueeze(0) * 2 - 1  # Shape: (1, chunk_size, 3, h, w)
             frames = [np.array(f).astype(np.uint8) for f in frames_PIL]
 
@@ -294,26 +285,27 @@ def main_worker():
             for i, frame_idx in enumerate(chunk_indices):
                 gt_frames[frame_idx] = frames[i]
 
-            # Load and replicate mask for this chunk
-            single_mask = Image.fromarray(np.array(read_single_mask(mask_path, 1)[0]))
-            masks = [single_mask] * chunk_size
-            binary_masks = [np.expand_dims((np.array(m) != 0).astype(np.uint8), 2) for m in masks]
-            masks = _to_tensors(masks).unsqueeze(0)  # Shape: (1, chunk_size, 1, h, w)
+            # Load masks for this chunk
+            selected_masks = []
+            for frame_idx in chunk_indices:
+                mask_path = os.path.join(masks_path, os.path.basename(frame_list[video_no]), 'masks', f'{frame_idx + 1:05d}.png')
+                if not os.path.exists(mask_path):
+                    raise FileNotFoundError(f"Mask file not found: {mask_path}")
+                mask_pil = read_single_mask(mask_path)
+                selected_masks.append(mask_pil)
 
-            # Verify shapes
-            # print(f"Imgs shape: {imgs.shape}, Masks shape: {masks.shape}")
+            # Convert masks to tensors
+            binary_masks = [np.expand_dims((np.array(m) != 0).astype(np.uint8), 2) for m in selected_masks]
+            masks_tensor = _to_tensors(selected_masks).unsqueeze(0)  # Shape: (1, chunk_size, 1, h, w)
 
             # Move to GPU
-            # print('GPU check 3', get_gpu_memory())
             selected_imgs = imgs.to(device)
-            selected_masks = masks.to(device)
-            # print('GPU check 4', get_gpu_memory())
+            selected_masks_tensor = masks_tensor.to(device)
 
             with torch.no_grad():
                 from torch.amp import autocast
                 with autocast('cuda'):
-                    input_imgs = selected_imgs * (1 - selected_masks)
-                    # print('Input IMGs shape:', input_imgs.shape)
+                    input_imgs = selected_imgs * (1 - selected_masks_tensor)
                     pred_img = model(input_imgs)
                 pred_img = (pred_img + 1) / 2
                 pred_img = pred_img.cpu().permute(0, 2, 3, 1).numpy() * 255  # Shape: (chunk_size, h, w, 3)
@@ -327,9 +319,8 @@ def main_worker():
                     comp_frames[frame_idx] = comp_frames[frame_idx].astype(np.float32) * 0.5 + img.astype(np.float32) * 0.5
 
             # Clear GPU and CPU memory
-            del selected_imgs, selected_masks, input_imgs, pred_img, imgs, masks, frames_PIL, frames, binary_masks
+            del selected_imgs, selected_masks_tensor, input_imgs, pred_img, imgs, masks_tensor, frames_PIL, frames, binary_masks, selected_masks
             torch.cuda.empty_cache()
-            # print('GPU check 5', get_gpu_memory())
 
         # Evaluation loop
         ssim, psnr, s_psnr = 0., 0., 0.
@@ -349,7 +340,7 @@ def main_worker():
             # Use gt_frames for ground truth
             gt = cv2.cvtColor(np.array(gt_frames[f]).astype(np.uint8), cv2.COLOR_BGR2RGB)
             ssim += ssim_func(comp, gt, data_range=255, channel_axis=-1, win_size=65)
-            s_psnr += psnr_func(gt, comp, data_range=255)
+            s_psnr += psnr_func(gt  , comp, data_range=255)
 
         ssim_all += ssim
         s_psnr_all += s_psnr
@@ -361,12 +352,6 @@ def main_worker():
         del comp_frames, gt_frames, frame_from_videos
         torch.cuda.empty_cache()
 
-        # FVID computation (commented out as in original)
-        # imgs = _to_tensors(comp_PIL).unsqueeze(0).to(device)
-        # gts = _to_tensors([Image.fromarray(gt_frames[f]) for f in range(video_length)]).unsqueeze(0).to(device)
-        # output_i3d_activations.append(get_i3d_activations(imgs).cpu().numpy().flatten())
-        # real_i3d_activations.append(get_i3d_activations(gts).cpu().numpy().flatten())
-        
     fid_score = get_fid_score(real_i3d_activations, output_i3d_activations)
     print("[Finish evaluating, ssim is {}, psnr is {}]".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
     print("[fvid score is {}]".format(fid_score))
