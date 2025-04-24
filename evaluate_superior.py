@@ -252,8 +252,6 @@ def main_worker():
     model = net.InpaintGenerator().to(device)
     model_path = args.ckpt
     data = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(data)
-    print('loading from: {}'.format(args.ckpt))
 
     # Extract the state_dict based on checkpoint structure
     if 'netG' in data:
