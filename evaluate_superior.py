@@ -14,6 +14,7 @@ import json
 from skimage import measure
 from skimage.metrics import structural_similarity as ssim_func, peak_signal_noise_ratio as psnr_func
 from core.utils import create_random_shape_with_random_motion
+import lpips
 
 import torch
 from torch.autograd import Variable
@@ -61,6 +62,26 @@ i3d_model = None
 _to_tensors = transforms.Compose([
     Stack(),
     ToTorchFormatTensor()])
+
+def init_lpips_model():
+    """Initialize the LPIPS model for perceptual similarity measurements"""
+    global lpips_model
+    if lpips_model is not None:
+        return
+        
+    print("[Loading LPIPS model for perceptual similarity ..]")
+    lpips_model = lpips.LPIPS(net='alex').to(torch.device('cuda:0'))  # Use AlexNet for LPIPS
+    lpips_model.eval()
+
+def compute_lpips(img0, img1):
+    """
+    Compute LPIPS perceptual similarity between two images
+    Input: img0, img1 as torch tensors in range [-1, 1] (BCHW)
+    Returns: similarity distance (lower is more similar)
+    """
+    init_lpips_model()
+    with torch.no_grad():
+        return lpips_model(img0, img1).item()
 
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     """Numpy implementation of the Frechet Distance.
@@ -231,6 +252,8 @@ def main_worker():
     model = net.InpaintGenerator().to(device)
     model_path = args.ckpt
     data = torch.load(args.ckpt, map_location=device)
+    model.load_state_dict(data)
+    print('loading from: {}'.format(args.ckpt))
 
     # Extract the state_dict based on checkpoint structure
     if 'netG' in data:
@@ -250,6 +273,7 @@ def main_worker():
 
     ssim_all, psnr_all, len_all = 0., 0., 0.
     s_psnr_all = 0.
+    lpips_all = 0.
     video_length_all = 0
     vfid = 0.
     output_i3d_activations = []
@@ -334,9 +358,13 @@ def main_worker():
             torch.cuda.empty_cache()
 
         # Evaluation loop
-        ssim, psnr, s_psnr = 0., 0., 0.
+        ssim, psnr, s_psnr, lpips_score = 0., 0., 0., 0.
         comp_PIL = []
         gt_PIL = []
+
+        # Initialize LPIPS model
+        init_lpips_model()
+
         for f in range(video_length):
             comp = comp_frames[f]
             comp = cv2.cvtColor(np.array(comp), cv2.COLOR_BGR2RGB)
@@ -361,11 +389,42 @@ def main_worker():
             ssim += ssim_func(comp, gt_rgb, data_range=255, channel_axis=-1, win_size=65)
             s_psnr += psnr_func(gt_rgb, comp, data_range=255)
 
+            # Compute LPIPS (perceptual similarity)
+            # Convert images to tensors normalized to [-1, 1]
+            comp_tensor = transforms.ToTensor()(comp).unsqueeze(0) * 2 - 1
+            gt_tensor = transforms.ToTensor()(gt_rgb).unsqueeze(0) * 2 - 1
+            comp_tensor = comp_tensor.to(device)
+            gt_tensor = gt_tensor.to(device)
+            
+            # Compute perceptual similarity
+            lpips_val = compute_lpips(comp_tensor, gt_tensor)
+            lpips_score += lpips_val
+
+            # Free up memory
+            del comp_tensor, gt_tensor
+            torch.cuda.empty_cache()
+
         ssim_all += ssim
         s_psnr_all += s_psnr
+        lpips_all += lpips_score
         video_length_all += video_length
         # if video_no % 5 == 0:
-        print("ssim {}, psnr {}".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
+        # print("ssim {}, psnr {}".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
+
+        # Print metrics for this video
+        print("Video {}: SSIM {:.4f}, PSNR {:.4f}, LPIPS {:.4f}".format(
+            frame_list[video_no].split("/")[-1], 
+            ssim / video_length, 
+            s_psnr / video_length,
+            lpips_score / video_length
+        ))
+        
+        # Print running average
+        print("Running average: SSIM {:.4f}, PSNR {:.4f}, LPIPS {:.4f}".format(
+            ssim_all / video_length_all, 
+            s_psnr_all / video_length_all,
+            lpips_all / video_length_all
+        ))
 
         # Compute VFID for this video
         if len(all_comp_PIL) > 0 and len(all_gt_PIL) > 0:
@@ -411,11 +470,22 @@ def main_worker():
         output_i3d_activations = np.array(output_i3d_activations)
         real_i3d_activations = np.array(real_i3d_activations)
         fid_score = get_fid_score(real_i3d_activations, output_i3d_activations)
-        print("[Finish evaluating, ssim is {}, psnr is {}]".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
-        print("[VFID score is {}]".format(fid_score))
+        
+        # Final metrics report
+        print("\n===== FINAL EVALUATION RESULTS =====")
+        print("SSIM: {:.4f}".format(ssim_all / video_length_all))
+        print("PSNR: {:.4f}".format(s_psnr_all / video_length_all))
+        print("LPIPS: {:.4f} (lower is better)".format(lpips_all / video_length_all))
+        print("VFID: {:.4f} (lower is better)".format(fid_score))
+        print("====================================")
     else:
-        print("[Finish evaluating, ssim is {}, psnr is {}]".format(ssim_all / video_length_all, s_psnr_all / video_length_all))
-        print("[VFID computation skipped - no valid frames processed]")
+        # Final metrics report without VFID
+        print("\n===== FINAL EVALUATION RESULTS =====")
+        print("SSIM: {:.4f}".format(ssim_all / video_length_all))
+        print("PSNR: {:.4f}".format(s_psnr_all / video_length_all))
+        print("LPIPS: {:.4f} (lower is better)".format(lpips_all / video_length_all))
+        print("VFID: N/A (no valid frames processed)")
+        print("====================================")
 
 if __name__ == '__main__':
     main_worker()
