@@ -10,3 +10,4 @@ scipy
 scikit-image
 tqdm
 tensorboardX
+lpips
