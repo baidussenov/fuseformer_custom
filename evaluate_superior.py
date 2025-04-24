@@ -231,8 +231,17 @@ def main_worker():
     model = net.InpaintGenerator().to(device)
     model_path = args.ckpt
     data = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(data)
-    print('loading from: {}'.format(args.ckpt))
+
+    # Extract the state_dict based on checkpoint structure
+    if 'netG' in data:
+        state_dict = data['netG']
+        print("Extracted 'netG' state_dict from checkpoint")
+    else:
+        state_dict = data
+        print("Using direct state_dict from checkpoint")
+
+    model.load_state_dict(state_dict)
+    print('Loaded model from: {}'.format(args.ckpt))
     model.eval()
 
     frame_list, masks_path = get_frame_list(args)
@@ -247,7 +256,7 @@ def main_worker():
     real_i3d_activations = []
 
     model_name = args.ckpt.split("/")[-1].split(".")[0]
-    dump_results_dir = model_name + "_single_mask_results_low10"
+    dump_results_dir = model_name + "_single_mask_results_low10_after_finetune"
     if args.dump_results:
         if not os.path.exists(dump_results_dir):
             os.mkdir(dump_results_dir)
@@ -267,7 +276,7 @@ def main_worker():
         all_gt_PIL = []    # Store all ground truth frames for VFID
 
         # Define chunking parameters
-        max_frames_per_chunk = 30
+        max_frames_per_chunk = 20
         num_chunks = (video_length + max_frames_per_chunk - 1) // max_frames_per_chunk
 
         # Process video in chunks

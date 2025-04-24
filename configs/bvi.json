@@ -27,7 +27,7 @@
         "num_workers": 4,
         "log_freq": 20,
         "save_freq": 200,
-        "iterations": 25000,
+        "iterations": 15000,
         "niter": 5000
     }
 }
