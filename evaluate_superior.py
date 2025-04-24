@@ -254,6 +254,17 @@ def main_worker():
     data = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(data)
     print('loading from: {}'.format(args.ckpt))
+
+    # Extract the state_dict based on checkpoint structure
+    if 'netG' in data:
+        state_dict = data['netG']
+        print("Extracted 'netG' state_dict from checkpoint")
+    else:
+        state_dict = data
+        print("Using direct state_dict from checkpoint")
+
+    model.load_state_dict(state_dict)
+    print('Loaded model from: {}'.format(args.ckpt))
     model.eval()
 
     frame_list, masks_path = get_frame_list(args)

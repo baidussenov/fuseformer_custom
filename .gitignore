@@ -138,8 +138,10 @@ venv.bak/
 
 bvi_masks/
 data/
-fuseformer_single_mask_results/
 fuseformer_single_mask_results_low10/
+fuseformer_single_mask_results_normal_before_finetune/
+fuseformer_single_mask_results_low10_before_finetune/
+fuseformer_single_mask_results_low10_after_finetune/
 dataset_copy/
 checkpoints/
 logs/
