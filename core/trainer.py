@@ -89,6 +89,9 @@ class Trainer():
                 os.path.join(config['save_dir'], 'dis'))
             self.gen_writer = SummaryWriter(
                 os.path.join(config['save_dir'], 'gen'))
+            
+        # Track best validation loss
+        self.best_valid_loss = float('inf')
 
     # get current learning rate
     def get_lr(self):
@@ -155,7 +158,7 @@ class Trainer():
             self.iteration = data['iteration']
         else:
             # Load pretrained fuseformer.pth if no checkpoint is found
-            pretrained_path = 'checkpoints/fuseformer.pth'  # Specify the path to fuseformer.pth
+            pretrained_path = 'checkpoints/fuseformer_bvi_low20/best_model.pth'  # Specify the path to fuseformer.pth
             if os.path.isfile(pretrained_path):
                 if self.config['global_rank'] == 0:
                     print('Loading pretrained model from {}...'.format(pretrained_path))
@@ -283,6 +286,17 @@ class Trainer():
             gen_loss.backward()
             self.optimG.step()
 
+            if valid_loss.item() < self.best_valid_loss:
+                self.best_valid_loss = valid_loss.item()
+                if self.config['global_rank'] == 0:
+                    best_path = os.path.join(self.config['save_dir'], self.train_args['best_checkpoint'])
+                    if isinstance(self.netG, torch.nn.DataParallel) or isinstance(self.netG, DDP):
+                        netG = self.netG.module
+                    else:
+                        netG = self.netG
+                    torch.save(netG.state_dict(), best_path)
+                    logging.info(f'[Iter {self.iteration}] best model saved: valid_loss: {self.best_valid_loss:.8f}')
+
             # console logs
             if self.config['global_rank'] == 0:
                 pbar.update(1)
@@ -302,7 +316,7 @@ class Trainer():
                     else:
                         logging.info('[Iter {}] hole: {:.8f}; valid: {:.8f}'.format(self.iteration, hole_loss.item(), valid_loss.item()))
             # saving models
-            if self.iteration % self.train_args['save_freq'] == 0:
-                self.save(int(self.iteration//self.train_args['save_freq']))
+            # if self.iteration % self.train_args['save_freq'] == 0:
+            #     self.save(int(self.iteration//self.train_args['save_freq']))
             if self.iteration > self.train_args['iterations']:
                 break

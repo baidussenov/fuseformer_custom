@@ -3,7 +3,7 @@
     "save_dir": "checkpoints/",
     "data_loader": {
         "name": "BVI",
-        "data_root": "./dataset_copy/low_light_10",
+        "data_root": "./dataset_train/low_light_10",
         "w": 432,
         "h": 240,
         "sample_length": 5
@@ -19,15 +19,16 @@
         "no_dis": 1
     },
     "trainer": {
+        "best_checkpoint": "best_model.pth",
         "type": "Adam",
         "beta1": 0.5,
         "beta2": 0.99,
         "lr": 1e-5,
         "batch_size": 8,
         "num_workers": 4,
-        "log_freq": 20,
-        "save_freq": 200,
-        "iterations": 15000,
-        "niter": 5000
+        "log_freq": 15,
+        "save_freq": 0,
+        "iterations": 7500,
+        "niter": 2500
     }
 }

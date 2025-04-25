@@ -66,6 +66,11 @@ _to_tensors = transforms.Compose([
 def init_lpips_model():
     """Initialize the LPIPS model for perceptual similarity measurements"""
     global lpips_model
+    try:
+        lpips_model
+    except NameError:
+        lpips_model = None
+
     if lpips_model is not None:
         return
         
@@ -179,7 +184,7 @@ def get_frame_list(args):
         data_root = "./data/YouTubeVOS/"
         frame_dir = os.path.join(data_root, "test_all_frames", "JPEGImages")
     else:
-        frame_dir = "dataset_copy/low_light_10"
+        frame_dir = "dataset_test/low_light_10"
         masks_path = '../masker/output_masks'
 
     frame_folder = sorted(os.listdir(frame_dir))
@@ -243,6 +248,14 @@ def get_res_list(dir):
     folders = sorted(os.listdir(dir))
     return [os.path.join(dir, f) for f in folders]
 
+def safe_psnr(gt, pred, data_range=255):
+    """Calculate PSNR with protection against divide-by-zero."""
+    epsilon = 1e-10  # Small value to prevent division by zero
+    mse = np.mean(np.square(gt.astype(np.float32) - pred.astype(np.float32)))
+    if mse < epsilon:  # If images are nearly identical
+        return 100.0  # Return a high but finite value
+    return psnr_func(gt, pred, data_range=data_range)
+
 def main_worker():
     import os
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -278,7 +291,7 @@ def main_worker():
     real_i3d_activations = []
 
     model_name = args.ckpt.split("/")[-1].split(".")[0]
-    dump_results_dir = model_name + "_single_mask_results_low10_after_finetune"
+    dump_results_dir = model_name + "_single_mask_results_low10_after_finetuned_for_low20+10"
     if args.dump_results:
         if not os.path.exists(dump_results_dir):
             os.mkdir(dump_results_dir)
@@ -385,7 +398,7 @@ def main_worker():
             # Compute metrics
             gt_rgb = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
             ssim += ssim_func(comp, gt_rgb, data_range=255, channel_axis=-1, win_size=65)
-            s_psnr += psnr_func(gt_rgb, comp, data_range=255)
+            s_psnr += safe_psnr(gt_rgb, comp, data_range=255)
 
             # Compute LPIPS (perceptual similarity)
             # Convert images to tensors normalized to [-1, 1]
